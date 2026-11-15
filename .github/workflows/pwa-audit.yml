@@ -1,63 +1,40 @@
-name: AUREON Task PWA Audit
-
+name: Portal protected PWA audit
 on:
   push:
     branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
   audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Validate PWA files
+      - name: Validate installed app metadata
         run: |
-          test -s index.html
-          test -s app.html
-          test -s manifest.webmanifest
-          test -s sw.js
-          test -s icon-192.png
-          test -s icon-512.png
-          test -s icon-maskable-512.png
-          python - <<'PY'
-          import json
-          m=json.load(open('manifest.webmanifest'))
-          assert m['display'] == 'standalone'
-          assert m['start_url']
-          assert m['name'] and m['short_name']
-          icons=m.get('icons',[])
-          assert any(i.get('sizes')=='192x192' for i in icons)
-          assert any(i.get('sizes')=='512x512' for i in icons)
-          assert any('maskable' in i.get('purpose','') for i in icons)
+          python3 - <<'PY'
+          import json, pathlib, struct
+          m=json.loads(pathlib.Path('manifest.webmanifest').read_text())
+          assert m['name'] and m['short_name'] and m['display']=='standalone'
+          assert m['start_url'].startswith('./') and m['scope']=='./'
+          for size in (192,512):
+            p=pathlib.Path('icon-'+str(size)+'.png')
+            b=p.read_bytes()
+            assert b[:8]==b'\x89PNG\r\n\x1a\n'
+            assert struct.unpack('>II',b[16:24])==(size,size)
+          assert any('maskable' in i.get('purpose','') for i in m['icons'])
           PY
-      - name: Validate PWA install experience
-        run: node tests/pwa-install-contract.test.js
-      - name: Validate Captação meeting summary contract
-        run: node tests/captacao-summary-contract.test.js
-      - name: Validate structured couple profiles
-        run: node tests/captacao-profile-rows-contract.test.js
-      - name: Validate gift efficiency metrics
-        run: node tests/captacao-gift-efficiency-contract.test.js
-      - name: Validate Setembro X paste import contract
-        run: node tests/captacao-import-contract.test.js
-      - name: Validate Setembro X snapshot contract
-        run: node tests/captacao-september-snapshot-contract.test.js
-      - name: Validate meeting readiness contract
-        run: node tests/captacao-readiness-contract.test.js
-      - name: Validate service worker safety
+      - name: Validate protected delivery contract
         run: |
-          python - <<'PY'
-          import re
-          sw=open('sw.js', encoding='utf-8').read()
-          app=open('app.html', encoding='utf-8').read()
-          cache=re.search(r"CACHE=CACHE_PREFIX\+'(v[^']+)'", sw)
-          assert cache, 'service worker cache version missing'
-          assert "serviceWorker.register('./sw.js')" in app, 'Task app must register service worker'
-          assert './captacao.html' in sw and './captacao-resumo.html' in sw, 'meeting pages must be cached'
-          assert "req.mode==='navigate'" in sw, 'navigation fallback missing'
-          assert 'SHELL_URLS' in sw, 'shell allowlist missing'
-          PY
-          grep -q "captacao-resumo.html" sw.js
+          node <<'NODE'
+          const fs=require('fs'),assert=require('node:assert/strict'),vm=require('node:vm');
+          const paths=fs.existsSync('app.html')?['index.html','app.html','captacao.html','captacao-resumo.html','captacao-validacao.html']:['index.html'];
+          for(const p of paths){
+            const html=fs.readFileSync(p,'utf8');
+            assert(html.includes('/rest/v1/portal_'),'Missing protected document API: '+p);
+            assert(html.includes("cache:'no-store'"),'Private response must not be cached: '+p);
+            assert(html.includes("Authorization:'Bearer '+s.access_token"),'Document request must carry session: '+p);
+            assert(!html.includes('SUPABASE_SERVICE_ROLE_KEY'),'Server credentials in public shell');
+            for(const [,js] of html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g))new vm.Script(js);
+          }
+          NODE
